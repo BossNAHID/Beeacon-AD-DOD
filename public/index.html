@@ -324,6 +324,7 @@
   table.matrix tbody td.zero{color:var(--text-4);opacity:.55;}
   table.matrix tbody td.hi{color:var(--accent-strong);font-weight:600;}
   table.matrix tbody td.rowtotal{font-weight:600;color:var(--text);border-left:1px solid var(--line);}
+  table.matrix tbody td.prevtotal{font-weight:600;color:var(--text-2);border-left:1px solid var(--line);}
   table.matrix tbody tr:hover td{background:var(--row-hover);}
   table.matrix tbody tr:hover td:first-child{background:var(--surface-2);}
   table.matrix tfoot td{padding:9px 12px;font-family:var(--font-mono);font-weight:600;color:var(--text);
@@ -782,9 +783,12 @@
   <div class="tab-panel" id="panel-merchantMatrix" role="tabpanel" aria-labelledby="tab-merchantMatrix">
     <div class="matrix-toolbar">
       <span class="hint">Order count per merchant, per day. Click any column header to sort. Scroll to see the full date range. Click the star to mark a business as potential — shared with everyone viewing this dashboard.</span>
-      <label class="marked-only-toggle">
-        <input type="checkbox" id="markedOnlyFilter"> Show marked only
-      </label>
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+        <label class="marked-only-toggle">
+          <input type="checkbox" id="markedOnlyFilter"> Show marked only
+        </label>
+        <button class="csv-btn" id="merchantMatrixCsvBtn" type="button">Download CSV</button>
+      </div>
     </div>
     <div class="matrix-wrap"><table class="matrix" id="merchantMatrixTable"></table></div>
   </div>
@@ -1651,6 +1655,7 @@ function sortRows(rows, s, dates){
     let av, bv;
     if (s.col === 'name'){ av = a.name; bv = b.name; return a.name.localeCompare(b.name) * asc; }
     else if (s.col === 'total'){ av = a.total; bv = b.total; }
+    else if (s.col === 'prev'){ av = a.prevTotal || 0; bv = b.prevTotal || 0; }
     else { av = a.values[parseInt(s.col,10)] || 0; bv = b.values[parseInt(s.col,10)] || 0; }
     if (av === bv) return 0;
     return (av > bv ? 1 : -1) * asc;
@@ -1671,28 +1676,42 @@ function renderMerchantMatrix(){
   try { renderMerchantMatrixInner(table); }
   catch(err){ renderTabError(table.parentElement, err); }
 }
-function renderMerchantMatrixInner(table){
-  if (!STATE.merchants.length){ table.innerHTML = ''; return; }
+// Single source of truth for the Merchant x Date table AND its CSV export:
+// same filters (KAM, search, marked-only), same sort, same date columns.
+function lastMonthTotalLabel(){
+  const mo = fmtMonthShort(STATE.previousMonthLabel);
+  return mo ? mo + ' Total' : 'Last Month Total';
+}
+function getMerchantMatrixSortedRows(){
   const dates = STATE.dates;
   const s = STATE.merchantSort;
-
   const rows = getFilteredPool()
     .filter(m => !STATE.markedOnly || STATE.marks.has(String(m.businessId)))
     .map(m => {
       const values = safeOrders(m.orders);
       return { m, name: m.businessName, values,
-        total: values.reduce((a,v) => a + (Number(v) || 0), 0) };
+        total: values.reduce((a,v) => a + (Number(v) || 0), 0),
+        prevTotal: m.prev ? (Number(m.prev.orders) || 0) : null };
     });
-  const sorted = sortRows(rows, s, dates);
+  return sortRows(rows, s, dates);
+}
+
+function renderMerchantMatrixInner(table){
+  if (!STATE.merchants.length){ table.innerHTML = ''; return; }
+  const dates = STATE.dates;
+  const s = STATE.merchantSort;
+  const sorted = getMerchantMatrixSortedRows();
 
   const thead = `<thead><tr>
       <th data-col="name" aria-sort="${sortArrow(s.col==='name'?s.dir:0)}">Merchant</th>
       ${dates.map((d,i) => `<th data-col="${i}" aria-sort="${sortArrow(s.col===String(i)?s.dir:0)}">${esc(fmtDate(d))}</th>`).join('')}
       <th data-col="total" aria-sort="${sortArrow(s.col==='total'?s.dir:0)}">Total</th>
+      <th data-col="prev" aria-sort="${sortArrow(s.col==='prev'?s.dir:0)}">${esc(lastMonthTotalLabel())}</th>
     </tr></thead>`;
 
   const colTotals = dates.map(() => 0);
   let grandTotal = 0;
+  let prevGrand = 0;
 
   const bodyRows = sorted.map((row, r) => {
     const { m, values } = row;
@@ -1706,19 +1725,50 @@ function renderMerchantMatrixInner(table){
       return `<td class="${cls}" data-cell data-matrix="merchant" data-r="${r}" data-c="${i}">${shown}</td>`;
     }).join('');
     grandTotal += rowTotal;
+    const hasPrev = row.prevTotal !== null && row.prevTotal !== undefined;
+    if (hasPrev) prevGrand += row.prevTotal;
     const isMarked = STATE.marks.has(String(m.businessId));
-    return `<tr data-name="${esc(m.businessName)}" data-id="${esc(m.businessId)}"><td><button class="mark-star ${isMarked ? 'active' : ''}" type="button" data-mark-id="${esc(m.businessId)}" title="${isMarked ? 'Unmark' : 'Mark as potential'}" aria-label="Mark as potential">${isMarked ? '★' : '☆'}</button>${esc(m.businessName)}<br><span class="mid">#${esc(m.businessId)}</span></td>${cells}<td class="rowtotal">${rowTotal}</td></tr>`;
+    return `<tr data-name="${esc(m.businessName)}" data-id="${esc(m.businessId)}"><td><button class="mark-star ${isMarked ? 'active' : ''}" type="button" data-mark-id="${esc(m.businessId)}" title="${isMarked ? 'Unmark' : 'Mark as potential'}" aria-label="Mark as potential">${isMarked ? '★' : '☆'}</button>${esc(m.businessName)}<br><span class="mid">#${esc(m.businessId)}</span></td>${cells}<td class="rowtotal">${rowTotal}</td><td class="prevtotal">${hasPrev ? row.prevTotal : '–'}</td></tr>`;
   }).join('');
 
   const tfoot = `<tfoot><tr>
       <td>Total</td>
       ${colTotals.map(t => `<td>${t}</td>`).join('')}
       <td>${grandTotal}</td>
+      <td>${prevGrand}</td>
     </tr></tfoot>`;
 
-  table.innerHTML = thead + `<tbody>${bodyRows || '<tr><td colspan="' + (dates.length + 2) + '">No merchants match the current filter.</td></tr>'}</tbody>` + tfoot;
+  table.innerHTML = thead + `<tbody>${bodyRows || '<tr><td colspan="' + (dates.length + 3) + '">No merchants match the current filter.</td></tr>'}</tbody>` + tfoot;
   bindMatrixSort(table, 'merchantSort');
 }
+
+document.getElementById('merchantMatrixCsvBtn').addEventListener('click', () => {
+  if (!STATE.merchants.length) return;
+  const dates = STATE.dates;
+  const sorted = getMerchantMatrixSortedRows();
+  if (!sorted.length) return;
+  const header = ['Merchant', 'Merchant ID', ...dates.map(d => fmtDate(d)), 'Total', lastMonthTotalLabel()];
+  const colTotals = dates.map(() => 0);
+  let grandTotal = 0;
+  let prevGrand = 0;
+  const body = sorted.map(({ m, values, prevTotal }) => {
+    let rowTotal = 0;
+    const cells = dates.map((d, i) => {
+      const raw = values[i];
+      const v = Number(raw) || 0;
+      rowTotal += v; colTotals[i] += v;
+      return (raw === null || raw === undefined) ? '–' : v;   // same as table
+    });
+    grandTotal += rowTotal;
+    const hasPrev = prevTotal !== null && prevTotal !== undefined;
+    if (hasPrev) prevGrand += prevTotal;
+    return [m.businessName, m.businessId, ...cells, rowTotal, hasPrev ? prevTotal : '–'];
+  });
+  const footer = ['Total', '', ...colTotals, grandTotal, prevGrand];
+  const span = dates.length ? String(dates[0]) + '_to_' + String(dates[dates.length - 1]) : 'all';
+  const fname = ('merchant-x-date_' + span).replace(/[^\w.-]+/g, '-') + '.csv';
+  downloadCsv(fname, [header, ...body, footer]);
+});
 
 /* ---------------- kam matrix ---------------- */
 function renderKamMatrix(){
