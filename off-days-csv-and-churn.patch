@@ -1,0 +1,265 @@
+diff --git a/public/index.html b/public/index.html
+index 91a49bc..e17f534 100644
+--- a/public/index.html
++++ b/public/index.html
+@@ -405,10 +405,11 @@
+   .trend-label{flex:1;min-width:0;text-align:center;font-family:var(--font-mono);font-size:10px;color:var(--text-3);}
+ 
+   /* ---- Off Days panel ---- */
+-  .off-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:18px;}
++  .off-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px;}
+   .off-stat{text-align:left;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-lg);
+     padding:16px 18px;cursor:pointer;font-family:inherit;box-shadow:var(--shadow-sm);transition:border-color .12s;}
+   .off-stat .lbl{display:block;font-size:12px;color:var(--text-3);margin-bottom:8px;}
++  .off-stat .sub{display:block;margin-top:6px;font-size:11.5px;color:var(--text-4);}
+   .off-stat .num{display:block;font-family:var(--font-display);font-size:24px;font-weight:700;color:var(--alert);}
+   .off-stat:hover{border-color:var(--line-strong);}
+   .off-stat.active{border-color:var(--alert);box-shadow:0 0 0 1px var(--alert) inset;}
+@@ -416,6 +417,12 @@
+     padding:18px 20px;box-shadow:var(--shadow-sm);}
+   .off-list-head{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:12px;flex-wrap:wrap;}
+   .off-list-head h3{margin:0;font-family:var(--font-display);font-size:14px;font-weight:600;}
++  .off-head-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
++  .off-segment{background:var(--surface-2);border:1px solid var(--line);border-radius:var(--radius-sm);
++    padding:7px 10px;font-size:13px;color:var(--text);font-family:inherit;cursor:pointer;}
++  .badge.churn{background:var(--alert-dim);color:var(--alert-strong);border:1px solid var(--alert-dim);}
++  .badge.dormant{background:var(--surface-2);color:var(--text-3);border:1px solid var(--line);}
++  .off-hint{font-size:12px;color:var(--text-4);margin:0 0 10px;}
+   .off-search{background:var(--surface-2);border:1px solid var(--line);border-radius:var(--radius-sm);
+     padding:7px 12px;font-size:13px;color:var(--text);min-width:200px;}
+   .off-search:focus{border-color:var(--accent);box-shadow:var(--focus-ring);}
+@@ -768,12 +775,22 @@
+       <button class="off-stat active" type="button" data-threshold="2"><span class="lbl">Off 2+ Days</span><span class="num" id="offCount2">–</span></button>
+       <button class="off-stat" type="button" data-threshold="3"><span class="lbl">Off 3+ Days</span><span class="num" id="offCount3">–</span></button>
+       <button class="off-stat" type="button" data-threshold="7"><span class="lbl">Off 7+ Days</span><span class="num" id="offCount7">–</span></button>
++      <button class="off-stat" type="button" data-threshold="30"><span class="lbl">Churn · 30+ Days</span><span class="num" id="offCount30">–</span><span class="sub" id="offCount30Sub"></span></button>
+     </section>
+     <section class="off-list-card">
+       <div class="off-list-head">
+         <h3 id="offListTitle">Businesses Off 2+ Days</h3>
+-        <input type="search" id="offSearch" class="off-search" placeholder="Search…" aria-label="Search businesses">
++        <div class="off-head-actions">
++          <select id="offSegment" class="off-segment" aria-label="Churn segment" hidden>
++            <option value="all">All 30+ inactive</option>
++            <option value="churned">Churned (ordered last month)</option>
++            <option value="dormant">Dormant (no orders last month)</option>
++          </select>
++          <input type="search" id="offSearch" class="off-search" placeholder="Search…" aria-label="Search businesses">
++          <button class="csv-btn" id="offCsvBtn" type="button">Download CSV</button>
++        </div>
+       </div>
++      <p class="off-hint" id="offHint" hidden></p>
+       <div class="matrix-wrap"><table class="off-table" id="offTable"></table></div>
+       <div class="pagination" id="offPagination"></div>
+     </section>
+@@ -896,7 +913,7 @@ let STATE = {
+   loading: false, lastSync: null, hasData: false,
+   merchantSort: { col: 'name', dir: 0 },   // dir: 0=native, 1=asc, 2=desc
+   kamSort: { col: 'name', dir: 0 },
+-  offThreshold: 2, offPage: 1,
++  offThreshold: 2, offPage: 1, offSegment: 'all',
+   topMetric: 'revenue', previousMonthLabel: null, topSubTab: 'leaderboard',
+   cmpMetric: 'orders', cmpPage: 1,
+   marks: new Set(), markedOnly: false
+@@ -1570,6 +1587,43 @@ function renderFlagged(){
+   try { renderFlaggedInner(); }
+   catch(err){ renderTabError(wrap, err); }
+ }
++/* 30+ days churn / inactive.
++   Current-window zero-run alone can be misleading: a merchant with zero orders for the whole
++   window may have churned last month (real loss) or may simply never have shipped / been dormant
++   for 60+ days. Last month's totals (m.prev) separate those two groups.
++     Churned  = 30+ days inactive AND had orders last month
++     Dormant  = 30+ days inactive AND no orders last month (or no last-month record)
++   If last-month data isn't loaded, rows are listed as "Unverified". */
++const CHURN_DAYS = 30;
++function lastOrderIdx(orders){
++  for (let j = orders.length - 1; j >= 0; j--){ if (Number(orders[j]) > 0) return j; }
++  return -1;
++}
++function churnInfo(m){
++  const orders = safeOrders(m.orders);
++  const days = flaggedDays(orders);
++  const winLen = STATE.dates.length;
++  const hasPrevMonth = !!STATE.previousMonthLabel;
++  const prevOrders = m.prev ? (Number(m.prev.orders) || 0) : 0;
++  const prevRevenue = m.prev ? (Number(m.prev.revenue) || 0) : 0;
++  const allZeroWindow = winLen > 0 && days === winLen;
++  // Qualifies on the window alone, or (window shorter than 30d, all zero) + silent all of last month.
++  const qualifies = days >= CHURN_DAYS || (allZeroWindow && hasPrevMonth && prevOrders === 0);
++  let segment = 'unverified';
++  if (hasPrevMonth) segment = prevOrders > 0 ? 'churned' : 'dormant';
++  return { days, allZeroWindow, qualifies, segment, prevOrders, prevRevenue };
++}
++function churnDaysLabel(ci){
++  // Whole window silent => real gap is longer than what we can see, so show "31+" not "31".
++  return ci.allZeroWindow ? ci.days + '+' : String(ci.days);
++}
++function churnLastOrderText(m, ci){
++  const idx = lastOrderIdx(safeOrders(m.orders));
++  if (idx !== -1) return fmtDate(STATE.dates[idx]);
++  return ci.prevOrders > 0 ? 'Before ' + fmtDate(STATE.dates[0]) : '–';
++}
++const SEGMENT_LABEL = { churned: 'Churned', dormant: 'Dormant', unverified: 'Unverified' };
++
+ function renderFlaggedInner(){
+   const kamPick = document.getElementById('kamFilter').value;
+   const pool = kamPick
+@@ -1580,20 +1634,53 @@ function renderFlaggedInner(){
+   const c2 = withDays.filter(r => r.days >= 2).length;
+   const c3 = withDays.filter(r => r.days >= 3).length;
+   const c7 = withDays.filter(r => r.days >= 7).length;
++  const churnAll = pool.map(m => ({ m, ci: churnInfo(m) })).filter(r => r.ci.qualifies);
++  const nChurned = churnAll.filter(r => r.ci.segment === 'churned').length;
++  const nDormant = churnAll.filter(r => r.ci.segment === 'dormant').length;
+   document.getElementById('offCount2').textContent = fmtNum(c2);
+   document.getElementById('offCount3').textContent = fmtNum(c3);
+   document.getElementById('offCount7').textContent = fmtNum(c7);
++  document.getElementById('offCount30').textContent = fmtNum(churnAll.length);
++  document.getElementById('offCount30Sub').textContent = STATE.previousMonthLabel
++    ? `${fmtNum(nChurned)} churned · ${fmtNum(nDormant)} dormant`
++    : 'last-month data not loaded';
+   document.querySelectorAll('.off-stat').forEach(b =>
+     b.classList.toggle('active', Number(b.dataset.threshold) === STATE.offThreshold));
+ 
+-  document.getElementById('offListTitle').textContent = `Businesses Off ${STATE.offThreshold}+ Days`;
++  const isChurn = STATE.offThreshold === CHURN_DAYS;
++  const segSel = document.getElementById('offSegment');
++  const hintEl = document.getElementById('offHint');
++  segSel.hidden = !isChurn;
++  segSel.value = STATE.offSegment;
++
++  document.getElementById('offListTitle').textContent = isChurn
++    ? 'Churn Merchants · Inactive 30+ Days'
++    : `Businesses Off ${STATE.offThreshold}+ Days`;
+ 
+   const search = (document.getElementById('offSearch').value || '').trim().toLowerCase();
+-  let list = withDays.filter(r => r.days >= STATE.offThreshold);
+-  if (search){
+-    list = list.filter(r => (r.m.businessName + ' ' + r.m.businessId).toLowerCase().indexOf(search) !== -1);
++  const matchSearch = r => (r.m.businessName + ' ' + r.m.businessId).toLowerCase().indexOf(search) !== -1;
++  let list;
++  if (isChurn){
++    list = churnAll.map(r => ({ m: r.m, days: r.ci.days, ci: r.ci }));
++    if (STATE.offSegment !== 'all') list = list.filter(r => r.ci.segment === STATE.offSegment);
++    if (search) list = list.filter(matchSearch);
++    // Churned first (biggest lost volume on top), then dormant.
++    const segRank = { churned: 0, unverified: 1, dormant: 2 };
++    list.sort((a, b) => segRank[a.ci.segment] - segRank[b.ci.segment]
++      || b.ci.prevOrders - a.ci.prevOrders || b.days - a.days
++      || a.m.businessName.localeCompare(b.m.businessName));
++    hintEl.hidden = false;
++    hintEl.textContent = STATE.previousMonthLabel
++      ? `Churned = no orders for 30+ days but ordered in ${fmtMonthShort(STATE.previousMonthLabel)}. Dormant = no orders last month either (long inactive or never started). "${STATE.dates.length}+" means silent for the whole visible window.`
++      : 'Last-month data not found (add the "LAST 3MONTH" tab) — list is based on the current window only, so churned vs dormant cannot be told apart.';
++  } else {
++    list = withDays.filter(r => r.days >= STATE.offThreshold);
++    if (search) list = list.filter(matchSearch);
++    list.sort((a, b) => b.days - a.days || a.m.businessName.localeCompare(b.m.businessName));
++    hintEl.hidden = true;
+   }
+-  list.sort((a, b) => b.days - a.days || a.m.businessName.localeCompare(b.m.businessName));
++  STATE.offExportList = list;   // full filtered list (all pages) used by the CSV export
++  document.getElementById('offCsvBtn').disabled = list.length === 0;
+ 
+   const totalPages = Math.max(1, Math.ceil(list.length / OFF_PAGE_SIZE));
+   if (STATE.offPage > totalPages) STATE.offPage = totalPages;
+@@ -1601,12 +1688,28 @@ function renderFlaggedInner(){
+   const startIdx = (STATE.offPage - 1) * OFF_PAGE_SIZE;
+   const pageItems = list.slice(startIdx, startIdx + OFF_PAGE_SIZE);
+ 
+-  const rowsHtml = pageItems.map((r, i) => {
+-    const orders = safeOrders(r.m.orders);
+-    let lastIdx = -1;
+-    for (let j = orders.length - 1; j >= 0; j--){ if (Number(orders[j]) > 0){ lastIdx = j; break; } }
+-    const lastOrder = lastIdx === -1 ? '–' : fmtDate(STATE.dates[lastIdx]);
+-    return `<tr>
++  let headHtml, rowsHtml, cols;
++  if (isChurn){
++    headHtml = '<tr><th>Rank</th><th>Business</th><th>KAM</th><th>Last Order</th><th>Days Off</th><th>Last Mo. Orders</th><th>Last Mo. Revenue</th><th>Segment</th></tr>';
++    cols = 8;
++    rowsHtml = pageItems.map((r, i) => `<tr>
++        <td>${startIdx + i + 1}</td>
++        <td>${esc(r.m.businessName)}<div class="mid">#${esc(r.m.businessId)}</div></td>
++        <td><span class="kam-tag">${esc(r.m.assignedKam || 'Unassigned')}</span></td>
++        <td>${esc(churnLastOrderText(r.m, r.ci))}</td>
++        <td>${churnDaysLabel(r.ci)}</td>
++        <td>${STATE.previousMonthLabel ? fmtNum(r.ci.prevOrders) : '–'}</td>
++        <td>${STATE.previousMonthLabel ? fmtMoney(r.ci.prevRevenue) : '–'}</td>
++        <td><span class="badge ${r.ci.segment === 'churned' ? 'churn' : 'dormant'}">${SEGMENT_LABEL[r.ci.segment]}</span></td>
++      </tr>`).join('');
++  } else {
++    cols = 6;
++    headHtml = '<tr><th>Rank</th><th>Business</th><th>KAM</th><th>Last Order</th><th>Days Off</th><th>Status</th></tr>';
++    rowsHtml = pageItems.map((r, i) => {
++      const orders = safeOrders(r.m.orders);
++      const lastIdx = lastOrderIdx(orders);
++      const lastOrder = lastIdx === -1 ? '–' : fmtDate(STATE.dates[lastIdx]);
++      return `<tr>
+         <td>${startIdx + i + 1}</td>
+         <td>${esc(r.m.businessName)}<div class="mid">#${esc(r.m.businessId)}</div></td>
+         <td><span class="kam-tag">${esc(r.m.assignedKam || 'Unassigned')}</span></td>
+@@ -1614,11 +1717,12 @@ function renderFlaggedInner(){
+         <td>${r.days}</td>
+         <td><span class="badge off">Inactive</span></td>
+       </tr>`;
+-  }).join('');
++    }).join('');
++  }
+ 
+   document.getElementById('offTable').innerHTML =
+-    `<thead><tr><th>Rank</th><th>Business</th><th>KAM</th><th>Last Order</th><th>Days Off</th><th>Status</th></tr></thead>` +
+-    `<tbody>${rowsHtml || '<tr><td colspan="6">No matches.</td></tr>'}</tbody>`;
++    `<thead>${headHtml}</thead>` +
++    `<tbody>${rowsHtml || `<tr><td colspan="${cols}">No matches.</td></tr>`}</tbody>`;
+ 
+   const pag = document.getElementById('offPagination');
+   let pagHtml = '';
+@@ -1628,6 +1732,12 @@ function renderFlaggedInner(){
+   pag.innerHTML = pagHtml;
+ }
+ 
++document.getElementById('offSegment').addEventListener('change', e => {
++  STATE.offSegment = e.target.value;
++  STATE.offPage = 1;
++  renderFlagged();
++});
++
+ document.querySelectorAll('.off-stat').forEach(btn => {
+   btn.addEventListener('click', () => {
+     STATE.offThreshold = Number(btn.dataset.threshold);
+@@ -1639,6 +1749,34 @@ document.getElementById('offSearch').addEventListener('input', debounce(() => {
+   STATE.offPage = 1;
+   renderFlagged();
+ }, 180));
++document.getElementById('offCsvBtn').addEventListener('click', () => {
++  const list = STATE.offExportList || [];
++  if (!list.length) return;
++  const isChurn = STATE.offThreshold === CHURN_DAYS;
++  let header, body;
++  if (isChurn){
++    header = ['Rank', 'Business', 'Business ID', 'KAM', 'Last Order', 'Days Off', 'Last Month Orders', 'Last Month Revenue', 'Segment'];
++    body = list.map((r, i) => [
++      i + 1, r.m.businessName, r.m.businessId, r.m.assignedKam || 'Unassigned',
++      churnLastOrderText(r.m, r.ci).replace('–', ''), churnDaysLabel(r.ci),
++      STATE.previousMonthLabel ? r.ci.prevOrders : '', STATE.previousMonthLabel ? Math.round(r.ci.prevRevenue) : '',
++      SEGMENT_LABEL[r.ci.segment]
++    ]);
++  } else {
++    header = ['Rank', 'Business', 'Business ID', 'KAM', 'Last Order', 'Days Off', 'Status'];
++    body = list.map((r, i) => {
++      const idx = lastOrderIdx(safeOrders(r.m.orders));
++      return [i + 1, r.m.businessName, r.m.businessId, r.m.assignedKam || 'Unassigned',
++        idx === -1 ? '' : fmtDate(STATE.dates[idx]), r.days, 'Inactive'];
++    });
++  }
++  const kamPick = document.getElementById('kamFilter').value;
++  const base = isChurn ? 'churn-30-plus-days' : 'off-' + STATE.offThreshold + '-plus-days';
++  const seg = isChurn && STATE.offSegment !== 'all' ? '_' + STATE.offSegment : '';
++  const fname = (base + seg + (kamPick ? '_' + kamPick : '') + '_' + new Date().toISOString().slice(0, 10))
++    .replace(/[^\w.-]+/g, '-') + '.csv';
++  downloadCsv(fname, [header, ...body]);
++});
+ document.getElementById('offPagination').addEventListener('click', e => {
+   const btn = e.target.closest('.pg-btn');
+   if (!btn) return;
