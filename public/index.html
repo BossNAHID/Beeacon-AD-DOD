@@ -416,6 +416,7 @@
     padding:18px 20px;box-shadow:var(--shadow-sm);}
   .off-list-head{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:12px;flex-wrap:wrap;}
   .off-list-head h3{margin:0;font-family:var(--font-display);font-size:14px;font-weight:600;}
+  .off-head-actions{display:flex;align-items:center;gap:10px;}
   .off-search{background:var(--surface-2);border:1px solid var(--line);border-radius:var(--radius-sm);
     padding:7px 12px;font-size:13px;color:var(--text);min-width:200px;}
   .off-search:focus{border-color:var(--accent);box-shadow:var(--focus-ring);}
@@ -772,7 +773,10 @@
     <section class="off-list-card">
       <div class="off-list-head">
         <h3 id="offListTitle">Businesses Off 2+ Days</h3>
-        <input type="search" id="offSearch" class="off-search" placeholder="Search…" aria-label="Search businesses">
+        <div class="off-head-actions">
+          <input type="search" id="offSearch" class="off-search" placeholder="Search…" aria-label="Search businesses">
+          <button class="csv-btn" id="offCsvBtn" type="button">Download CSV</button>
+        </div>
       </div>
       <div class="matrix-wrap"><table class="off-table" id="offTable"></table></div>
       <div class="pagination" id="offPagination"></div>
@@ -1594,6 +1598,8 @@ function renderFlaggedInner(){
     list = list.filter(r => (r.m.businessName + ' ' + r.m.businessId).toLowerCase().indexOf(search) !== -1);
   }
   list.sort((a, b) => b.days - a.days || a.m.businessName.localeCompare(b.m.businessName));
+  STATE.offExportList = list;   // full filtered list (all pages) used by the CSV export
+  document.getElementById('offCsvBtn').disabled = list.length === 0;
 
   const totalPages = Math.max(1, Math.ceil(list.length / OFF_PAGE_SIZE));
   if (STATE.offPage > totalPages) STATE.offPage = totalPages;
@@ -1639,6 +1645,22 @@ document.getElementById('offSearch').addEventListener('input', debounce(() => {
   STATE.offPage = 1;
   renderFlagged();
 }, 180));
+document.getElementById('offCsvBtn').addEventListener('click', () => {
+  const list = STATE.offExportList || [];
+  if (!list.length) return;
+  const header = ['Rank', 'Business', 'Business ID', 'KAM', 'Last Order', 'Days Off', 'Status'];
+  const body = list.map((r, i) => {
+    const orders = safeOrders(r.m.orders);
+    let lastIdx = -1;
+    for (let j = orders.length - 1; j >= 0; j--){ if (Number(orders[j]) > 0){ lastIdx = j; break; } }
+    const lastOrder = lastIdx === -1 ? '' : fmtDate(STATE.dates[lastIdx]);
+    return [i + 1, r.m.businessName, r.m.businessId, r.m.assignedKam || 'Unassigned', lastOrder, r.days, 'Inactive'];
+  });
+  const kamPick = document.getElementById('kamFilter').value;
+  const fname = ('off-' + STATE.offThreshold + '-plus-days' + (kamPick ? '_' + kamPick : '') + '_' + new Date().toISOString().slice(0, 10))
+    .replace(/[^\w.-]+/g, '-') + '.csv';
+  downloadCsv(fname, [header, ...body]);
+});
 document.getElementById('offPagination').addEventListener('click', e => {
   const btn = e.target.closest('.pg-btn');
   if (!btn) return;
